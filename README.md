@@ -1,410 +1,443 @@
 # Anubis Store — versi Laravel
 
-Port **tampilan depan** [Anubis Store](https://github.com/wang-vault/anubis) (aslinya Next.js 15 +
-Supabase) ke **Laravel 12 + Blade**. Seluruh halaman aplikasi yang diakses melalui route memakai
-view **`.blade.php`** di `resources/views/` dan layout Blade bersama
-`resources/views/components/layouts/app.blade.php` (`<x-layouts.app>`), dengan beranda
-`welcome.blade.php`, CRUD produk lengkap, dan alur pesanan transfer manual di SQLite.
+Toko online sederhana dengan **pembayaran transfer manual**, dibuat dengan **Laravel 12 + Blade + SQLite**.
+Ini port dari sisi depan [Anubis Store](https://github.com/wang-vault/anubis) (aslinya Next.js + Supabase).
 
-Bentuk proyeknya mengikuti contoh [`qwerti1945/dasar_laravel`](https://github.com/qwerti1945/dasar_laravel):
-skeleton Laravel standar + layout component `resources/views/components/layouts/app.blade.php` +
-controller/model/migration/factory/seeder untuk tiap entitas (di contoh: `Student`, di sini:
-`Product` dan `Order`).
-
-> **Yang diport: etalase + pesanan manual.** Checkout, kode pesanan, klaim "sudah transfer",
-> verifikasi penjual, dan `/testimoni` **sudah ikut**. Login di sini session-based lokal (bukan
-> Supabase Auth), dan yang tetap **tidak** ikut adalah gerbang pembayaran (Stenly, Yobasepay,
-> QRIS otomatis), chat WhatsApp, serta notifikasi Telegram — semuanya tetap hidup di aplikasi
-> aslinya. Halaman downloader juga cuma tiruan tampilan.
+Pembeli tidak perlu daftar akun. Alurnya: pilih produk → isi form pesan → transfer sendiri →
+tekan "Saya sudah transfer" → penjual cek mutasi rekening → status naik sampai selesai.
 
 ---
 
-## Yang ada di sini
+## Daftar isi
 
-| Bagian | Isi |
-|---|---|
-| Beranda `/` | Hero "Belanja gampang, *kabar* pembayaran datang cepat", **kotak pencarian produk**, 3 langkah cara kerja, teaser downloader, 6 produk terbaru |
-| Katalog `/products` | Daftar semua produk + pencarian `?q=...` (form GET, jalan tanpa JavaScript) + pagination 12 baris per halaman |
-| CRUD produk | Tambah, lihat detail, ubah, hapus — dengan validasi & pesan flash |
-| Checkout `/checkout/{id}` | Form untuk tamu (tanpa daftar akun): nama, WhatsApp, jumlah — nama & harga produk **difoto** (snapshot) ke pesanan |
-| Pesanan `/orders/{kode}` | Kode `ORD-YYYYMMDD-XXXXXX`, halaman rincian terbuka lewat kodenya, alur status `PENDING → PAID → PROCESSING → DONE` |
-| Klaim transfer | Pembeli menandai "sudah transfer" (+ nomor referensi & catatan); status **tetap** `PENDING` sampai penjual menyetujui |
-| Kelola pesanan `/orders` | Khusus penjual: daftar semua pesanan, dua saringan (`?status=PAID`, `?payment=PENDING`), ubah, dan hapus pesanan |
-| Testimoni `/testimoni` | Otomatis dari pesanan `DONE` (maks 20 terbaru), nama pembeli dipendekkan jadi "Budi S.", tanpa nomor WA/kode/total |
-| Tentang `/about` | Penjelasan alur transfer manual via WhatsApp |
-| Downloader `/downloader` | Halaman statis 3 platform (TikTok, YouTube, Instagram) |
-| Tampilan | CSS statis `public/css/anubis.css` — gaya koran: kertas hangat, tinta, aksen oxblood, sudut tajam, bayangan offset |
-| Login penjual | `POST /login` berbasis session + pembatasan 5 percobaan/menit; semua rute tulis dilindungi middleware `auth` |
-| Batas tulis | `throttle:product-write` 20/menit/penjual, `order-create` 10/menit/IP, `order-claim` 5/menit/IP, `order-status` 30/menit/penjual — lebih dari itu muncul halaman 429 |
-| Halaman error | 403, 404, 419, 429, 500 memakai tata letak yang sama (`resources/views/errors/`), bukan halaman bawaan Laravel |
-| CI | `.github/workflows/ci.yml` — matrix PHP 8.2/8.3/8.4 (install, `.env`, migrasi+seed, kompilasi Blade, `route:list`, `php artisan test`) + job `pint --test` |
-| Test | 65 pengujian: `AuthTest` (13 — login & hak akses), `ProductTest` (16 — katalog, CRUD, pagination, pencarian, halaman error, throttle), `OrderTest` (29 — checkout, kode pesanan, snapshot, klaim, alur status, ubah & hapus pesanan, status pembayaran), `TestimonialTest` (5 — privasi & batas 20), `ExampleTest` bawaan skeleton (2 — feature + unit) |
-
-**Tidak perlu `npm install` / `npm run build`.** Layout Blade aplikasi memakai
-`<link rel="stylesheet">` ke CSS statis `public/css/anubis.css`, bukan `@vite`, jadi
-`php artisan serve` langsung menampilkan tampilan lengkap. `resources/views/welcome.blade.php`
-merupakan view beranda aktif yang dipanggil oleh route `/` melalui `HomeController@index`.
+1. [Fitur](#1-fitur)
+2. [Tutorial: menjalankan di komputer sendiri](#2-tutorial-menjalankan-di-komputer-sendiri)
+3. [Tutorial: mencoba alur aplikasi](#3-tutorial-mencoba-alur-aplikasi)
+4. [Struktur proyek](#4-struktur-proyek)
+5. [Bagian yang perlu dijelaskan secara rinci](#5-bagian-yang-perlu-dijelaskan-secara-rinci)
+6. [Cara deploy](#6-cara-deploy)
+7. [Kekurangan dan batasan](#7-kekurangan-dan-batasan)
+8. [Rute dan skema database](#8-rute-dan-skema-database)
+9. [Kredit dan lisensi](#9-kredit-dan-lisensi)
 
 ---
 
-## Struktur view Blade
+## 1. Fitur
 
-Semua view aplikasi berada di `resources/views/` dan menggunakan ekstensi `.blade.php`.
-Sebagian besar halaman dibungkus layout component bersama:
-
-```blade
-<x-layouts.app title="Judul Halaman">
-    <!-- isi halaman -->
-</x-layouts.app>
-```
-
-Layout tersebut menyediakan masthead, navigasi, pesan flash, footer, dan slot konten.
-Form memakai directive Blade seperti `@csrf`, `@method`, `@error`, dan `@forelse`, sedangkan
-komponen/potongan yang dipakai ulang berada di `resources/views/products/partials/` dan
-`resources/views/partials/`. Halaman error juga memiliki partial bersama di
-`resources/views/errors/partials/notice.blade.php`. `welcome.blade.php` adalah view beranda aktif dan dirender oleh route `/`; `index.blade.php`
-merupakan salinan kompatibilitas dari template beranda.
-
-## Login & hak akses
-
-Katalog, checkout, dan rincian pesanan **boleh dibaca siapa saja**; yang dilindungi hanya aksi
-tulis milik penjual.
-
-| Siapa | Boleh |
+| Untuk | Fitur |
 |---|---|
-| Tamu / pembeli | `/`, `/about`, `/downloader`, `/testimoni`, `/products` (hanya produk **aktif**), `/products/{id}`, `/checkout/{id}` (GET + POST), `/orders/{kode}` (rincian pesanan lewat kodenya), `POST /orders/{kode}/claim` |
-| Penjual (sudah masuk) | semua di atas + `/products/create`, `POST /products`, `/products/{id}/edit`, `PUT`, `DELETE`, melihat produk nonaktif di daftar kelola, `/orders` (semua pesanan), `POST /orders/{kode}/status`, `POST /orders/{kode}/reject-claim`, `/orders/{kode}/edit`, `PUT /orders/{kode}`, `DELETE /orders/{kode}` |
+| Pembeli (tanpa login) | Lihat katalog + pencarian, detail produk, checkout, halaman pesanan lewat kode, tombol "Saya sudah transfer", lihat testimoni |
+| Penjual (login) | CRUD produk, daftar semua pesanan + saringan, setujui / tolak klaim transfer, naikkan status, ubah dan hapus pesanan |
+| Keamanan | Login berbasis session, middleware `auth`, CSRF, validasi server-side, pembatasan laju (rate limit) |
+| Tampilan | Blade layout component `<x-layouts.app>`, CSS statis `public/css/anubis.css`, halaman error 403/404/419/429/500 buatan sendiri |
 
-> Pembeli **tidak punya akun**. Kode pesanan `ORD-YYYYMMDD-XXXXXX` merangkap jadi alamat dan
-> kunci akses: siapa pun yang memegang kode itu bisa membuka dan mengklaim pesanannya — sama
-> seperti tautan lacak di aplikasi aslinya. Karena itu kode tidak bisa ditebak berurutan
-> (6 karakter acak tanpa `0/O/1/I/L`) dan rute mengikat model lewat `{order:order_code}`.
+---
 
-Akun demo dibuat oleh seeder:
+## 2. Tutorial: menjalankan di komputer sendiri
 
-```
-email    : admin@anubis.test
-password : password
-```
+### Persyaratan
 
-> Ganti password itu sebelum dipakai di lingkungan nyata (`php artisan tinker` →
-> `User::where('email','admin@anubis.test')->first()->update(['password' => Hash::make('...')])`).
-
-Login ini session-based biasa (bukan Supabase Auth seperti di aplikasi aslinya):
-`Auth::attempt()`, session di-regenerate setelah masuk (anti session fixation),
-`Auth::logout()` + `session()->invalidate()` saat keluar, dan maksimal 5 percobaan
-gagal per menit untuk tiap kombinasi email + IP.
-
-Arah pengalihan diatur di `bootstrap/app.php`:
-
-```php
-$middleware->redirectGuestsTo(fn () => route('login'));   // tamu -> /login
-$middleware->redirectUsersTo(fn () => route('home'));     // sudah masuk -> /
-```
-
-Setelah login, penjual dikembalikan ke halaman yang tadi diblokir
-(`redirect()->intended()`), misalnya `/products/create`.
-
-## Persyaratan
-
-- **PHP ^8.2** dengan ekstensi: `pdo_sqlite`, `mbstring`, `openssl`, `ctype`, `json`, `tokenizer`,
-  `xml`, `curl`, `fileinfo`, `bcmath`
+- **PHP 8.2 atau lebih baru** dengan ekstensi `pdo_sqlite`, `mbstring`, `openssl`, `ctype`, `json`, `tokenizer`, `xml`, `curl`, `fileinfo`, `bcmath`
 - **Composer 2.x**
-- SQLite (bawaan PHP) — tidak perlu MySQL
+- Git
 
 Cek cepat:
 
 ```bash
 php -v
+composer -V
 php -m | grep -Ei "pdo_sqlite|mbstring|openssl|tokenizer|xml|curl|fileinfo|bcmath"
 ```
 
-## Menjalankan
+### Langkah instalasi
 
 ```bash
-git clone https://github.com/wang-vault/repo-tumbal.git anubis-laravel
-cd anubis-laravel
+# 1. Ambil kode
+git clone https://github.com/wang-vault/laravel-projek.git
+cd laravel-projek
 
-composer install                       # pakai composer.lock yang sudah disertakan (Laravel 12.68)
+# 2. Pasang dependensi PHP
+composer install
+
+# 3. Siapkan file konfigurasi
 cp .env.example .env
 php artisan key:generate
-touch database/database.sqlite         # database SQLite kosong
-php artisan migrate --seed             # tabel + akun penjual demo + 10 produk + 6 pesanan contoh
-php artisan serve                      # http://127.0.0.1:8000
+
+# 4. Siapkan database SQLite (file kosong)
+touch database/database.sqlite          # Windows PowerShell: New-Item database/database.sqlite
+
+# 5. Buat tabel + isi data contoh
+php artisan migrate --seed
+
+# 6. Jalankan
+php artisan serve
 ```
 
-Menjalankan test:
+Buka <http://127.0.0.1:8000>.
+
+Tidak perlu `npm install` atau `npm run build`, karena layout memakai file CSS statis
+(`public/css/anubis.css`), bukan Vite.
+
+### Akun penjual demo
+
+```
+Email    : admin@anubis.test
+Password : password
+```
+
+> Akun ini hanya untuk demo. **Ganti passwordnya** sebelum aplikasi dipasang di internet (lihat bagian deploy).
+
+### Menjalankan test
 
 ```bash
-php artisan test                       # semua test (65)
-php artisan test --filter=AuthTest         # khusus login & hak akses
-php artisan test --filter=ProductTest      # khusus produk
-php artisan test --filter=OrderTest        # khusus checkout, klaim, alur status
-php artisan test --filter=TestimonialTest  # khusus testimoni & privasi data pembeli
+php artisan test
+php artisan test --filter=OrderTest      # hanya satu kelompok
 ```
 
-Login di browser: buka <http://127.0.0.1:8000/login> dengan `admin@anubis.test` / `password`.
+---
 
-Mencoba alur pesan tanpa login: buka salah satu produk → **Pesan Produk Ini** → isi form →
-simpan kodenya (`ORD-…`) → di halaman rincian klik **Saya sudah transfer** → masuk sebagai
-penjual → buka `/orders` → setujui klaimnya sampai status `DONE` → lihat hasilnya di `/testimoni`.
+## 3. Tutorial: mencoba alur aplikasi
 
-> Tidak punya PHP/Composer di mesin yang dipakai? Direktori `preview-kit/` berisi perkakas untuk menjalankan
-> aplikasi lewat **PHP-WASM**: `bash preview-kit/setup.sh --demo` (mengunduh PHP-WASM lewat npm,
-> 111 paket vendor dari GitHub, merakit autoloader, migrasi + seed) lalu
-> `APP_ROOT=/tmp/verify/app PORT=8080 node preview-kit/server.mjs`. Test juga bisa dijalankan
-> dengan `bash preview-kit/run-tests.sh`. Semua ini perkakas sandbox — di mesin biasa cukup
-> `composer install` + `php artisan serve` + `php artisan test`.
+Urutan ini juga cocok dipakai sebagai skrip demo video.
 
-## CI & gaya kode
+**Sebagai pembeli (tanpa login)**
 
-Workflow `.github/workflows/ci.yml` jalan tiap `push` ke `main` dan tiap pull request:
+1. Buka `/` lalu klik salah satu produk, atau buka `/products` dan coba kotak pencarian.
+2. Di halaman detail klik **Pesan Produk Ini**.
+3. Isi nama, nomor WhatsApp (boleh `0812…`, `+62 812…`, dsb.), dan jumlah. Klik simpan.
+4. Kamu diarahkan ke `/orders/ORD-YYYYMMDD-XXXXXX`. **Simpan kode itu**, karena itu satu-satunya kunci untuk membuka pesanan lagi.
+5. Klik **Saya sudah transfer** (nomor referensi dan catatan boleh diisi). Status masih `PENDING`, karena menunggu penjual.
 
-| Job | Isi |
-|---|---|
-| `tests` | matrix PHP **8.2 / 8.3 / 8.4**: `composer install`, `cp .env.example .env` + `key:generate`, `migrate --seed`, `view:cache` (ikut menangkap salah sintaks Blade), `route:list`, lalu `php artisan test` |
-| `style` | `pint --test` dengan preset **laravel** (`pint.json`). Pint dipasang global di runner, tidak masuk `composer.lock` supaya lock file tetap ramping |
+**Sebagai penjual**
 
-Merapikan gaya kode di mesin sendiri:
+1. Buka `/login`, masuk dengan akun demo.
+2. Buka `/orders`. Pesanan yang diklaim akan terlihat.
+3. Buka pesanannya, lalu **setujui** (status jadi `PAID`) atau **tolak** klaim (pembeli boleh klaim ulang).
+4. Naikkan status: `PAID` → `PROCESSING` → `DONE`. Melompat atau mundur ditolak.
+5. Buka `/testimoni`. Pesanan `DONE` muncul di sana dengan nama pembeli disamarkan ("Budi S.").
+6. Coba juga CRUD produk di `/products` setelah login, dan coba hapus produk yang sudah pernah dipesan (akan ditolak dengan pesan ramah).
+
+---
+
+## 4. Struktur proyek
+
+```
+app/
+  Http/Controllers/
+    HomeController.php          beranda, about, downloader
+    ProductController.php       CRUD produk + pencarian + pagination
+    CheckoutController.php      form pesan + pembuatan pesanan
+    OrderController.php         halaman pesanan, klaim, kelola, ubah status
+    TestimonialController.php   testimoni dari pesanan DONE
+    Auth/LoginController.php    login / logout + pembatasan percobaan
+  Models/
+    Product.php                 scope active(), formatted_price
+    Order.php                   alur status, kode pesanan, normalisasi WA, samarkan nama
+  Providers/AppServiceProvider.php   rate limiter + tampilan pagination
+bootstrap/app.php               arah redirect untuk auth / guest
+routes/web.php                  semua rute
+database/
+  migrations/                   products, orders (+ users/cache/jobs bawaan Laravel)
+  seeders/                      UserSeeder, ProductSeeder, OrderSeeder
+  factories/                    ProductFactory, OrderFactory
+resources/views/
+  components/layouts/app.blade.php   layout bersama
+  products/ orders/ auth/ errors/    halaman-halaman
+  checkout.blade.php  testimoni.blade.php  welcome.blade.php ...
+public/css/anubis.css           seluruh tampilan
+tests/Feature/                  AuthTest, ProductTest, OrderTest, TestimonialTest
+preview-kit/                    perkakas sandbox (PHP-WASM), bukan bagian aplikasi
+```
+
+---
+
+## 5. Bagian yang perlu dijelaskan secara rinci
+
+Bagian ini disusun supaya bisa langsung dipakai sebagai kerangka **3 video penjelasan**.
+
+### Video 1 — Gambaran umum, database, dan model (± 8–10 menit)
+
+| Yang dijelaskan | File | Poin penting |
+|---|---|---|
+| Tujuan aplikasi dan demo alur | seluruh aplikasi | Tunjukkan demo pembeli lalu penjual (bagian 3) sebelum masuk kode |
+| Struktur folder Laravel | bagian 4 | Pola MVC: route → controller → model → view |
+| Migration `products` dan `orders` | `database/migrations/` | `restrictOnDelete` pada `product_id`, kolom **snapshot**, index `[order_status, created_at]` |
+| Seeder dan factory | `database/seeders/`, `database/factories/` | Kenapa ada akun demo dan data contoh |
+| Model `Product` | `app/Models/Product.php` | `$fillable`, `casts`, `scopeActive()`, accessor `formatted_price` |
+| Model `Order` | `app/Models/Order.php` | Konstanta `FLOW` dan `TRANSITIONS`, `canTransitionTo()`, hook `saving` yang menghitung ulang `total_amount` |
+
+### Video 2 — Alur kode inti: route, controller, view (± 10–12 menit)
+
+| Yang dijelaskan | File | Poin penting |
+|---|---|---|
+| Rute dan middleware | `routes/web.php` | Rute publik vs `auth`; **urutan penting**: `/products/create` harus sebelum `/products/{product}` |
+| Route model binding kustom | `routes/web.php` | `{order:order_code}` memakai kode, bukan `id` |
+| Checkout | `CheckoutController.php` | Normalisasi WhatsApp (`0812…` → `62812…`), validasi, pembuatan snapshot |
+| Kode pesanan | `Order::generateCode()` | Format `ORD-YYYYMMDD-XXXXXX`, zona WIB, alfabet tanpa `0/O/1/I/L`, pengecekan unik |
+| Klaim dan verifikasi | `OrderController.php` | `claim()`, `updateStatus()`, `rejectClaim()`; kenapa klaim tidak langsung menaikkan status |
+| Mesin status | `Order.php` | `PENDING → PAID → PROCESSING → DONE`, hanya maju satu langkah |
+| CRUD produk | `ProductController.php` | Validasi, pencarian `LIKE`, `paginate()->withQueryString()`, penolakan hapus produk yang sudah dipesan |
+| Testimoni dan privasi | `TestimonialController.php` | Query hanya mengambil 4 kolom aman; `maskBuyerName()` |
+| Blade | `components/layouts/app.blade.php`, `orders/show.blade.php` | `<x-layouts.app>`, `@csrf`, `@method`, `@error`, `@forelse`, `@auth`, linimasa status |
+
+### Video 3 — Keamanan, test, deploy, dan kekurangan (± 8–10 menit)
+
+| Yang dijelaskan | File | Poin penting |
+|---|---|---|
+| Login | `LoginController.php`, `bootstrap/app.php` | `Auth::attempt`, `session()->regenerate()`, redirect `intended()`, batas 5 percobaan per email + IP |
+| Rate limiting | `AppServiceProvider.php` | Empat limiter dan alasan kuncinya (IP untuk tamu, id penjual untuk penjual) |
+| Perlindungan bawaan Laravel | seluruh form | CSRF, escaping Blade `{{ }}`, mass-assignment lewat `$fillable` |
+| Test | `tests/Feature/` | Apa yang diuji; cara menjalankan `php artisan test` |
+| Deploy | bagian 6 | Langkah produksi dan `.env` |
+| Kekurangan | bagian 7 | Sampaikan dengan jujur, ini menunjukkan pemahaman |
+
+---
+
+## 6. Cara deploy
+
+Pilih salah satu. **Opsi A** paling umum untuk tugas/portofolio, **Opsi B** paling fleksibel.
+
+### Persiapan `.env` produksi (berlaku untuk semua opsi)
+
+```dotenv
+APP_NAME="Anubis Store"
+APP_ENV=production
+APP_DEBUG=false                # WAJIB false di produksi
+APP_URL=https://domain-kamu.com
+APP_KEY=                       # isi dengan: php artisan key:generate
+
+DB_CONNECTION=sqlite           # atau mysql (lihat catatan di bawah)
+LOG_LEVEL=error
+```
+
+`SESSION_DRIVER`, `CACHE_STORE`, dan `QUEUE_CONNECTION` di `.env.example` memakai `database`, jadi tabelnya
+harus ada (dibuat oleh `php artisan migrate`).
+
+### Opsi A — Shared hosting / cPanel
+
+1. Di komputer sendiri jalankan `composer install --no-dev --optimize-autoloader`.
+2. Upload seluruh proyek (termasuk `vendor/`) ke folder di luar `public_html`, misalnya `~/anubis`.
+3. Isi `public_html` dengan isi folder `public/`, lalu ubah dua baris path di `public_html/index.php` supaya menunjuk ke `~/anubis/vendor/autoload.php` dan `~/anubis/bootstrap/app.php`.
+   (Alternatif: arahkan document root domain ke `~/anubis/public` kalau panelnya mengizinkan.)
+4. Buat `.env` di `~/anubis` (lihat di atas), lalu lewat Terminal cPanel atau SSH:
+
+   ```bash
+   php artisan key:generate --force
+   touch database/database.sqlite
+   php artisan migrate --force
+   ```
+
+5. Pastikan `storage/`, `bootstrap/cache/`, dan `database/` (beserta file `database.sqlite`) **bisa ditulis** oleh PHP (`chmod -R 775`).
+6. Buat akun penjual (lihat "Membuat akun penjual produksi" di bawah).
+7. Optimasi:
+
+   ```bash
+   php artisan config:cache && php artisan route:cache && php artisan view:cache
+   ```
+
+### Opsi B — VPS (Ubuntu + Nginx + PHP-FPM)
 
 ```bash
-composer global require laravel/pint   # sekali saja
-pint                                   # perbaiki langsung
-pint --test                            # cuma memeriksa (ini yang dijalankan CI)
-pint app/Models/Order.php              # satu berkas saja
+# Paket dasar
+sudo apt update
+sudo apt install nginx php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-mbstring \
+     php8.3-xml php8.3-curl php8.3-bcmath unzip git composer
+
+# Kode
+cd /var/www
+sudo git clone https://github.com/wang-vault/laravel-projek.git anubis
+cd anubis
+sudo composer install --no-dev --optimize-autoloader
+sudo cp .env.example .env         # lalu edit sesuai bagian "Persiapan .env produksi"
+sudo php artisan key:generate --force
+sudo touch database/database.sqlite
+sudo php artisan migrate --force
+
+# Izin tulis
+sudo chown -R www-data:www-data storage bootstrap/cache database
+sudo chmod -R 775 storage bootstrap/cache database
+
+# Cache
+sudo php artisan config:cache && sudo php artisan route:cache && sudo php artisan view:cache
 ```
 
-Seluruh repo ini berlisensi **MIT** (berkas `LICENSE`).
+Konfigurasi Nginx (`/etc/nginx/sites-available/anubis`):
 
-## Rute
+```nginx
+server {
+    listen 80;
+    server_name domain-kamu.com;
+    root /var/www/anubis/public;      # harus menunjuk ke folder public/
 
-| Method | URI | Nama | Middleware | Controller |
-|---|---|---|---|---|
-| GET | `/` | `home` | `web` | `HomeController@index` |
-| GET | `/about` | `about` | `web` | `HomeController@about` |
-| GET | `/downloader` | `downloader` | `web` | `HomeController@downloader` |
-| GET | `/testimoni` | `testimoni` | `web` | `TestimonialController@index` |
-| GET | `/products` | `product-list` | `web` | `ProductController@index` |
-| GET | `/products/{product}` | `product-show` | `web` | `ProductController@show` |
-| GET | `/checkout/{product}` | `checkout` | `web` | `CheckoutController@create` |
-| POST | `/checkout/{product}` | `order-store` | `web, throttle:order-create` | `CheckoutController@store` |
-| GET | `/orders/{order:order_code}` | `order-show` | `web` | `OrderController@show` |
-| POST | `/orders/{order:order_code}/claim` | `order-claim` | `web, throttle:order-claim` | `OrderController@claim` |
-| GET | `/login` | `login` | `web, guest` | `Auth\LoginController@show` |
-| POST | `/login` | `login.store` | `web, guest` | `Auth\LoginController@store` |
-| POST | `/logout` | `logout` | `web, auth` | `Auth\LoginController@destroy` |
-| GET | `/products/create` | `product-create` | `web, auth` | `ProductController@create` |
-| POST | `/products` | `product-store` | `web, auth, throttle:product-write` | `ProductController@store` |
-| GET | `/products/{product}/edit` | `product-edit` | `web, auth` | `ProductController@edit` |
-| PUT | `/products/{product}` | `product-update` | `web, auth, throttle:product-write` | `ProductController@update` |
-| DELETE | `/products/{product}` | `product-destroy` | `web, auth, throttle:product-write` | `ProductController@destroy` |
-| GET | `/orders` | `order-list` | `web, auth` | `OrderController@index` |
-| POST | `/orders/{order:order_code}/status` | `order-status` | `web, auth, throttle:order-status` | `OrderController@updateStatus` |
-| POST | `/orders/{order:order_code}/reject-claim` | `order-claim-reject` | `web, auth, throttle:order-status` | `OrderController@rejectClaim` |
-| GET | `/orders/{order:order_code}/edit` | `order-edit` | `web, auth` | `OrderController@edit` |
-| PUT | `/orders/{order:order_code}` | `order-update` | `web, auth, throttle:order-status` | `OrderController@update` |
-| DELETE | `/orders/{order:order_code}` | `order-destroy` | `web, auth, throttle:order-status` | `OrderController@destroy` |
-| GET | `/up` | — | — | health check bawaan Laravel |
+    index index.php;
 
-Urutan pendaftaran di `routes/web.php` penting: `/products/create` dan
-`/products/{product}/edit` harus didefinisikan **sebelum** `/products/{product}`,
-kalau tidak kata `create`/`edit` ditangkap sebagai parameter `{product}`. `/orders` (daftar kelola)
-dan `/orders/{order:order_code}` tidak bentrok karena jumlah segmennya berbeda.
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
 
-Penamaan rute (`product-list`, `product-create`, …) sengaja meniru gaya `student-*` di repo contoh.
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+    }
 
-Membuka form (`product-create`, `product-edit`, `checkout`) **tidak** ikut dibatasi throttle —
-yang dibatasi hanya aksi menulis. Semua limiter didefinisikan di
-`AppServiceProvider::configureRateLimiting()`; kalau dilanggar, Laravel mengirim 429 yang dirender
-`resources/views/errors/429.blade.php`.
+    location ~ /\.(?!well-known).* { deny all; }
+}
+```
 
-| Limiter | Batas | Kunci | Melindungi |
+```bash
+sudo ln -s /etc/nginx/sites-available/anubis /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d domain-kamu.com      # HTTPS
+```
+
+### Membuat akun penjual produksi
+
+Jangan pakai `admin@anubis.test` / `password`. Buat akun sendiri lewat tinker:
+
+```bash
+php artisan tinker
+>>> \App\Models\User::create(['name' => 'Nama Penjual', 'email' => 'kamu@domain.com', 'password' => \Illuminate\Support\Facades\Hash::make('PasswordKuat!')]);
+```
+
+Kalau tadi kamu menjalankan `migrate --seed`, hapus atau ganti akun demo dan data contohnya.
+Untuk produksi sebaiknya cukup `php artisan migrate --force` (tanpa `--seed`).
+
+### Kalau memakai Cloudflare atau reverse proxy
+
+Rate limiter memakai alamat IP. Di belakang proxy, semua permintaan bisa terlihat berasal dari IP yang sama.
+Atur *trusted proxies* di `bootstrap/app.php`:
+
+```php
+$middleware->trustProxies(at: '*');   // atau daftar IP proxy kamu
+```
+
+### Update setelah ada perubahan kode
+
+```bash
+git pull
+composer install --no-dev --optimize-autoloader
+php artisan migrate --force
+php artisan config:cache && php artisan route:cache && php artisan view:cache
+```
+
+### Checklist sebelum publik
+
+- [ ] `APP_DEBUG=false` dan `APP_ENV=production`
+- [ ] `APP_KEY` sudah dibuat
+- [ ] Password akun demo sudah diganti / dihapus
+- [ ] Document root mengarah ke `public/`
+- [ ] `.env` tidak ikut ter-upload ke repo publik
+- [ ] HTTPS aktif
+- [ ] `storage/` dan `database/` bisa ditulis, tapi database SQLite **tidak** bisa diakses lewat URL
+- [ ] Ada cadangan (backup) file `database/database.sqlite`
+
+---
+
+## 7. Kekurangan dan batasan
+
+### Fitur yang sengaja belum ada
+
+- **Tidak ada gerbang pembayaran.** Pembeli transfer sendiri, penjual cek mutasi rekening secara manual. Tidak ada QRIS atau virtual account otomatis.
+- **Tidak ada notifikasi.** Nomor WhatsApp disimpan tetapi aplikasi tidak mengirim pesan apa pun (WhatsApp, Telegram, email). Penjual harus rajin membuka `/orders`.
+- **Tidak ada bukti transfer.** Pembeli hanya mengisi nomor referensi dan catatan teks, tidak bisa mengunggah foto.
+- **Instruksi pembayaran statis.** Info rekening tidak bisa diubah dari aplikasi, hanya teks di halaman.
+- **Tidak ada stok.** Tabel `products` tidak punya kolom stok, jadi produk bisa dipesan tanpa batas.
+- **Pesanan tidak kedaluwarsa.** Pesanan yang tidak dibayar tetap `PENDING` selamanya.
+- **Gambar produk hanya lewat URL** (`image_url`), tidak ada unggah file. Kalau situs asal gambarnya mati, gambar hilang.
+- **Halaman `/downloader` hanya tiruan tampilan**, tidak berfungsi.
+- **Tidak ada registrasi, lupa password, atau verifikasi email.** Hanya satu jenis akun: penjual.
+- **Teks masih tertanam di kode.** Folder `lang/` tidak dipakai, dan `APP_LOCALE` bawaan masih `en`.
+
+### Keterbatasan teknis dan keamanan
+
+- **Kode pesanan = kunci akses.** Siapa pun yang tahu kodenya bisa membuka dan mengklaim pesanan itu. Kodenya acak (6 karakter dari 31 huruf/angka) dan ada rate limit, tetapi ini tetap bukan autentikasi sungguhan. Kode juga terlihat kalau pembeli membagikan tautannya.
+- **Tidak ada otorisasi per pengguna** (`Policy`/`Gate`). Semua akun yang login dianggap penjual dengan hak penuh. Aman selama akun hanya dibuat manual, tapi tidak siap untuk banyak penjual atau peran.
+- **Akun demo berpassword `password`.** Berbahaya kalau terbawa ke produksi. `.env.example` juga memakai `APP_DEBUG=true` secara bawaan.
+- **Penjual bebas mengubah pesanan.** Lewat form ubah, harga satuan dan jumlah bisa diedit bahkan setelah lunas. Belum ada catatan riwayat perubahan (audit log).
+- **SQLite.** Cukup untuk toko kecil, tetapi menulis bersamaan dalam jumlah banyak akan menjadi bottleneck, dan backup harus manual. Untuk trafik lebih besar, pindah ke MySQL/PostgreSQL.
+- **Session, cache, dan queue memakai database.** Mudah disiapkan, tetapi lebih lambat dari Redis dan membebani database yang sama.
+- **Rate limiter berbasis IP.** Pengguna di jaringan yang sama (kantor, kampus) berbagi batas, dan di belakang proxy IP-nya bisa salah kalau *trusted proxies* belum diatur.
+- **Saringan status di `/orders` kemungkinan tidak bekerja.** Di `Order::scopeStatus()`, pengecekan memakai `in_array($status, self::TRANSITIONS, true)`, padahal isi `TRANSITIONS` berupa array sehingga tidak pernah cocok dengan string status. Kemungkinan besar seharusnya `array_keys(self::TRANSITIONS)`. *Ini temuan dari membaca kode, belum dijalankan; sebaiknya dites dulu sebelum diperbaiki.* Saringan `?payment=` memakai daftar yang benar sehingga tidak terkena masalah ini.
+- **Klaim transfer dan pengecekan mutasi murni manual**, jadi rawan salah cek dan penipuan bukti transfer kalau penjual kurang teliti.
+- **Tidak ada ekspor laporan** (CSV/PDF) dan tidak ada dashboard ringkasan penjualan.
+
+### Catatan dokumentasi
+
+- Versi README lama menyebut workflow CI (`.github/workflows/ci.yml`), tetapi filenya tidak ada di repositori ini. Tambahkan filenya atau abaikan klaim tersebut.
+- Jumlah test yang tertulis di README lama (65) belum diverifikasi; jalankan `php artisan test` untuk angka yang sebenarnya.
+
+---
+
+## 8. Rute dan skema database
+
+### Rute
+
+| Method | URI | Akses | Controller |
 |---|---|---|---|
-| `login` | 5/menit | email + IP | percobaan masuk |
-| `product-write` | 20/menit | penjual | tambah/ubah/hapus produk |
-| `order-create` | 10/menit | IP | `POST /checkout/{product}` (tamu, tanpa akun) |
-| `order-claim` | 5/menit | IP | `POST /orders/{kode}/claim` (tamu) |
-| `order-status` | 30/menit | penjual | ubah status, tolak klaim, ubah & hapus pesanan |
+| GET | `/`, `/about`, `/downloader`, `/testimoni` | publik | `HomeController`, `TestimonialController` |
+| GET | `/products`, `/products/{product}` | publik (tamu hanya melihat produk aktif) | `ProductController` |
+| GET / POST | `/checkout/{product}` | publik, POST kena `throttle:order-create` | `CheckoutController` |
+| GET | `/orders/{kode}` | publik lewat kode | `OrderController@show` |
+| POST | `/orders/{kode}/claim` | publik, `throttle:order-claim` | `OrderController@claim` |
+| GET / POST | `/login` | tamu | `LoginController` |
+| POST | `/logout` | penjual | `LoginController@destroy` |
+| GET / POST / PUT / DELETE | `/products/create`, `/products`, `/products/{id}/edit`, `/products/{id}` | penjual, `throttle:product-write` | `ProductController` |
+| GET | `/orders`, `/orders/{kode}/edit` | penjual | `OrderController` |
+| POST / PUT / DELETE | `/orders/{kode}/status`, `/reject-claim`, `/orders/{kode}` | penjual, `throttle:order-status` | `OrderController` |
+| GET | `/up` | health check bawaan Laravel | — |
 
-## Skema `products`
+### Batas laju
 
-Meniru tabel `products` milik Anubis (`supabase/store/001_schema.sql`):
+| Limiter | Batas | Kunci |
+|---|---|---|
+| `login` (di controller) | 5 / menit | email + IP |
+| `product-write` | 20 / menit | id penjual |
+| `order-create` | 10 / menit | IP |
+| `order-claim` | 5 / menit | IP |
+| `order-status` | 30 / menit | id penjual |
+
+### Tabel `products`
 
 | Kolom | Tipe | Aturan |
 |---|---|---|
-| `id` | bigint auto | primary key |
-| `name` | string | wajib, 2-120 karakter |
-| `description` | text | boleh kosong, maks. 2000 karakter |
-| `price` | unsigned bigint | wajib, **Rupiah penuh** tanpa desimal, Rp1.000 - Rp100.000.000 |
-| `image_url` | string | boleh kosong, harus URL valid |
-| `is_active` | boolean | default `true`; produk nonaktif tidak muncul di beranda |
-| `created_at` / `updated_at` | timestamp | otomatis |
+| `id` | bigint | primary key |
+| `name` | string | wajib, 2–120 karakter |
+| `description` | text | opsional, maks. 2000 |
+| `price` | unsigned bigint | Rupiah penuh, Rp1.000 – Rp100.000.000 |
+| `image_url` | string | opsional, harus URL |
+| `is_active` | boolean | default `true` |
+| `created_at`, `updated_at` | timestamp | otomatis |
 
-Index `[is_active, created_at]` untuk katalog publik (produk aktif, terbaru lebih dulu).
+### Tabel `orders` (ringkas)
 
-## Skema `orders`
+| Kolom | Keterangan |
+|---|---|
+| `order_code` | unik, `ORD-YYYYMMDD-XXXXXX` |
+| `product_id` | FK → `products`, `ON DELETE RESTRICT` |
+| `product_name_snapshot`, `unit_price_snapshot` | nama dan harga dibekukan saat pesan |
+| `quantity`, `total_amount` | 1–20; total = harga satuan × jumlah (dihitung ulang oleh model) |
+| `payment_status` | `PENDING` / `PAID` |
+| `order_status` | `PENDING` → `PAID` → `PROCESSING` → `DONE` |
+| `manual_claim_*` | klaim pembeli (waktu, catatan, referensi) |
+| `manual_review_*` | keputusan penjual (`APPROVED` / `REJECTED`, catatan, waktu) |
+| `buyer_*_snapshot` | nama, WhatsApp (format `62…`), email opsional |
+| `paid_at` | terisi saat status jadi `PAID` |
 
-Meniru tabel `orders` milik Anubis (`supabase/store/001_schema.sql`), dipangkas ke jalur `MANUAL` saja:
-
-| Kolom | Tipe | Aturan |
-|---|---|---|
-| `id` | bigint auto | primary key |
-| `order_code` | string unique | `ORD-YYYYMMDD-XXXXXX` — tanggal dalam **WIB** (UTC+7), 6 karakter acak dari alfabet `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (tanpa `0/O/1/I/L` supaya tidak mirip saat dibaca) |
-| `product_id` | FK → `products` | `ON DELETE RESTRICT` — produk yang sudah punya pesanan tidak bisa dihapus |
-| `product_name_snapshot` | string | nama produk **saat dipesan** |
-| `unit_price_snapshot` | unsigned bigint | harga satuan saat dipesan (Rupiah penuh) |
-| `quantity` | unsigned smallint | 1-20 per pesanan |
-| `total_amount` | unsigned bigint | `unit_price_snapshot × quantity` — dihitung ulang otomatis oleh model setiap pesanan disimpan |
-| `payment_method` | string | selalu `MANUAL` di port ini |
-| `payment_status` | string | `PENDING` \| `PAID` — penjual bisa mengubahnya lewat form ubah pesanan; tidak bisa ditarik mundur kalau pesanan sudah naik status |
-| `order_status` | string | `PENDING` \| `PAID` \| `PROCESSING` \| `DONE` |
-| `manual_claim_at` / `_note` / `_reference` | timestamp / text / string | isian pembeli saat menandai "sudah transfer" |
-| `manual_reviewed_at` / `_status` / `_note` | timestamp / string / text | keputusan penjual: `APPROVED` \| `REJECTED` + catatannya |
-| `paid_at` | timestamp nullable | terisi otomatis saat status jadi `PAID` |
-| `buyer_name_snapshot` | string | wajib, 2-80 karakter |
-| `buyer_whatsapp_snapshot` | string | dinormalkan ke `62…` (dari `0812…`, `+62 812…`, `62-812-…`) |
-| `buyer_email_snapshot` | string nullable | boleh kosong |
-| `created_at` / `updated_at` | timestamp | otomatis |
-
-Index `[order_status, created_at]` untuk daftar kelola + filter status.
-
-## Alur pesanan
+### Alur status
 
 ```
-  PENDING ──setujui klaim──> PAID ──> PROCESSING ──> DONE
-     │                        (hanya maju: tidak bisa melompat / mundur)
-     └── pembeli klaim "sudah transfer" → status TETAP PENDING, menunggu review penjual
+PENDING ──setujui──> PAID ──> PROCESSING ──> DONE
+   │
+   └─ pembeli klaim "sudah transfer" → status TETAP PENDING sampai penjual memutuskan
 ```
 
-1. Pembeli buka `/checkout/{id}` → isi nama, WhatsApp, jumlah → pesanan dibuat dengan status
-   `PENDING` + kode `ORD-…`. Nama dan harga produk **difoto** ke kolom snapshot, jadi menyunting
-   produk sesudahnya tidak mengubah pesanan yang sudah ada.
-2. Pembeli transfer manual, lalu buka `/orders/{kode}` → **Saya sudah transfer** (boleh ditambah
-   nomor referensi + catatan). Status belum naik — klaim hanya menandai pesanan ini menunggu
-   pemeriksaan, persis jalur manual di aplikasi aslinya.
-3. Penjual cek mutasi lewat `/orders` → **setujui** (status naik ke `PAID`, `paid_at` terisi,
-   review `APPROVED`) atau **tolak** (klaim dibersihkan, review `REJECTED`, pembeli boleh
-   mengklaim ulang).
-4. Penjual menaikkan `PAID → PROCESSING → DONE`. Lompatan (`PENDING → DONE`) dan langkah mundur
-   ditolak `Order::canTransitionTo()` dengan pesan flash.
-5. Pesanan `DONE` otomatis muncul sebagai testimoni di `/testimoni` (maks 20 terbaru).
-6. Penjual juga bisa **mengubah** pesanan lewat `/orders/{kode}/edit` (jumlah, harga satuan, data
-   pembeli, dan status pembayaran — total selalu dihitung ulang oleh model) serta **menghapusnya**
-   kalau itu pesanan uji atau duplikat. Menghapus pesanan sekaligus membuka kunci produk yang
-   tadinya tidak bisa dihapus karena sudah pernah dipesan.
+---
 
-Testimoni hanya membaca 4 kolom aman: `product_name_snapshot`, `quantity`, nama pembeli yang
-dipendekkan (`Order::maskBuyerName()` — "Budi Santoso" → "Budi S.", "Rizky" → "R***y"), dan
-tanggal selesai. Kode pesanan, nomor WhatsApp, email, dan nominal **tidak pernah** dikirim ke
-halaman itu.
+## 9. Kredit dan lisensi
 
-## Berkas yang ditambahkan / diubah
+- Desain dan skema produk: [wang-vault/anubis](https://github.com/wang-vault/anubis)
+- Bentuk proyek: [qwerti1945/dasar_laravel](https://github.com/qwerti1945/dasar_laravel)
+- Framework: [Laravel](https://laravel.com) (MIT)
 
-Ditambahkan di atas skeleton Laravel standar:
-
-```
-app/Http/Controllers/Auth/LoginController.php   login/logout + pembatasan percobaan
-app/Http/Controllers/HomeController.php         beranda, tentang, downloader
-app/Http/Controllers/ProductController.php      CRUD produk + pencarian + pagination 12/halaman
-app/Http/Controllers/CheckoutController.php     form checkout tamu + pembuatan pesanan + normalisasi WA
-app/Http/Controllers/OrderController.php        rincian, klaim, daftar kelola + filter, ubah status, tolak klaim
-app/Http/Controllers/TestimonialController.php  testimoni dari pesanan DONE
-app/Models/Product.php                          scope active(), formatted_price, status_label
-app/Models/Order.php                            generateCode(), maskBuyerName(), canTransitionTo(), scope status()/done()
-database/migrations/2026_09_25_000000_create_products_table.php
-database/migrations/2026_09_25_000100_create_orders_table.php
-database/factories/ProductFactory.php           + state inactive()
-database/factories/OrderFactory.php             + state claimed(), paid(), processing(), done()
-database/seeders/UserSeeder.php                 akun penjual demo (admin@anubis.test)
-database/seeders/ProductSeeder.php              6 produk pilihan + 4 acak
-database/seeders/OrderSeeder.php                6 pesanan contoh mencakup semua status (harus jalan setelah ProductSeeder)
-database/seeders/DatabaseSeeder.php             memanggil UserSeeder + ProductSeeder + OrderSeeder
-resources/views/components/layouts/app.blade.php TEMPLATE: masthead + nav + flash + footer + {{ $slot }}
-resources/views/index.blade.php                 beranda (dipakai route /)
-resources/views/auth/login.blade.php            form masuk
-resources/views/about.blade.php
-resources/views/downloader.blade.php
-resources/views/products/index.blade.php
-resources/views/products/create.blade.php
-resources/views/products/edit.blade.php
-resources/views/products/show.blade.php
-resources/views/checkout.blade.php              form pesan untuk pembeli (tanpa perlu akun)
-resources/views/orders/show.blade.php           rincian pesanan + garis waktu status + form klaim/verifikasi
-resources/views/orders/index.blade.php          daftar kelola + saringan status & pembayaran + ubah/hapus
-resources/views/orders/edit.blade.php           form ubah pesanan + zona hapus
-resources/views/testimoni.blade.php             kartu testimoni dari pesanan selesai
-resources/views/products/partials/form.blade.php form bersama create/edit
-resources/views/partials/pagination.blade.php   tampilan pagination sendiri (bukan class Tailwind)
-resources/views/errors/partials/notice.blade.php kerangka bersama halaman error
-resources/views/errors/403.blade.php            akses ditolak
-resources/views/errors/404.blade.php            alamat/produk tidak ada
-resources/views/errors/419.blade.php            sesi atau token CSRF kedaluwarsa
-resources/views/errors/429.blade.php            kena batas throttle (tulis produk / pesanan)
-resources/views/errors/500.blade.php            kesalahan server
-public/css/anubis.css                           seluruh tampilan (tanpa build step)
-tests/Feature/AuthTest.php                      13 pengujian login & hak akses
-tests/Feature/ProductTest.php                   15 pengujian katalog, CRUD, validasi, pagination, halaman error, throttle
-tests/Feature/OrderTest.php                     18 pengujian checkout, kode pesanan, snapshot harga, klaim, alur status, throttle
-tests/Feature/TestimonialTest.php               5 pengujian testimoni: hanya DONE, penyamaran nama, tanpa bocoran data, batas 20
-.github/workflows/ci.yml                        CI: test (PHP 8.2/8.3/8.4) + pemeriksaan gaya Pint
-pint.json                                       preset gaya kode: laravel
-LICENSE                                         MIT
-preview-kit/                                    perkakas sandbox preview (PHP-WASM) — bukan bagian aplikasi
-composer.lock                                   dari Laravel 12.68.0, content-hash cocok
-```
-
-Diubah dari skeleton: `routes/web.php`, `bootstrap/app.php` (arah redirect `auth`/`guest`),
-`app/Providers/AppServiceProvider.php` (tampilan pagination default + limiter `product-write`,
-`order-create`, `order-claim`, `order-status`), `.env.example` (`APP_NAME`, `APP_FAKER_LOCALE=id_ID`),
-`tests/Feature/ExampleTest.php` (pakai `RefreshDatabase`), `README.md`.
-
-Cara memakai template di halaman mana pun:
-
-```blade
-<x-layouts.app title="Judul Halaman">
-    <div class="container-x stack">
-        ... isi halaman ...
-    </div>
-</x-layouts.app>
-```
-
-Properti `title` opsional — kalau diisi, judul tab jadi `Judul Halaman · Anubis Store`.
-
-## Catatan `composer.lock`
-
-`laravel/laravel` tidak menyimpan `composer.lock`, jadi di sini lock file disertakan supaya hasil
-`composer install` sama di semua mesin (Laravel **v12.68.0**, 76 paket + 35 paket dev).
-Content hash lock file sudah diverifikasi cocok dengan `composer.json`.
-
-Kalau nanti kamu menambah paket baru, jalankan `composer require <paket>` dan commit `composer.lock`
-yang berubah.
-
-## Batasan port ini (yang sengaja belum ada)
-
-Port ini memindahkan **etalase toko** (beranda, katalog, detail produk), **login penjual**,
-**CRUD produk**, **alur pesanan transfer manual** (checkout → klaim → verifikasi → selesai), dan
-**`/testimoni`**. Aplikasi Anubis aslinya lebih besar; bagian berikut belum ikut dipindahkan.
-
-| Belum ada | Kondisi di Anubis asli | Catatan |
-|---|---|---|
-| Gerbang pembayaran | Stenly, Yobasepay, dan QRIS otomatis (`payment_id`, `payment_url`, `qr_image_url`, `payment_expired_at`, `last_payment_checked_at`) | port ini hanya jalur `MANUAL`: pembeli transfer sendiri, lalu mengklaim; penjual memverifikasi mutasi rekening |
-| Halaman `/orders/{code}/receipt` & `/pay/{code}` | struk pembayaran + halaman bayar | angka lengkapnya sudah ada di `/orders/{kode}`; dua halaman itu belum dibuat |
-| Status `EXPIRED` / pembayaran `FAILED` + tenggat bayar | pesanan kedaluwarsa sendiri kalau belum dibayar sampai `payment_expired_at`; pembayaran juga bisa ditandai gagal | tidak ada mekanisme tenggat di sini: alur berhenti di `DONE`, status bayar hanya `PENDING`/`PAID`, dan pesanan lama tetap `PENDING` sampai penjual menaikkannya |
-| Kolom `account_id` di `orders` | pesanan tertaut ke akun pembeli (Supabase Auth) | pembeli di sini tamu, jadi `order_code` merangkap kunci akses — tidak ada akun untuk ditautkan |
-| Chat WhatsApp & notifikasi Telegram | `waMeUrl()` ke penjual, `telegram_notified_at`, `manual_notified_at` | nomor WA pembeli disimpan & dinormalkan ke `62…`, tapi tidak ada pesan keluar dari aplikasi |
-| Tabel `manual_payment_settings` | rekening/QRIS tujuan yang bisa diubah admin | di sini instruksinya teks statis: pembeli diminta menghubungi penjual lewat WhatsApp |
-| Panel admin terpisah | `/admin` (dashboard), `/admin/products`, `/admin/orders`, `/admin/settings` | di sini digabung: `/products` berubah jadi daftar kelola setelah penjual masuk |
-| Downloader yang berfungsi | benar-benar mengunduh dari YouTube/audio/Instagram/TikTok lewat 8 rute API | di sini hanya tiruan tampilan, sesuai kesepakatan awal |
-| Registrasi, lupa/reset password, verifikasi email | ada di `/auth/*` | di sini satu akun demo dari seeder: `admin@anubis.test` / `password` |
-| Tabel `profiles` | `supabase/account/001_schema.sql` | port ini memakai tabel `users` bawaan Laravel apa adanya |
-| Unggah gambar produk | unggah berkas ke storage | di sini hanya kolom `image_url`; kalau kosong, kartu produk menampilkan inisial nama |
-| Policy / banyak penjual | tiap penjual punya produknya | belum ada `Policy`/`Gate`: penjual mana pun yang masuk boleh mengubah produk mana pun |
-| Berkas bahasa `lang/id` | teks antarmuka bahasa Indonesia | pesan Indonesia di sini ditulis langsung di Blade & aturan validasi controller, jadi folder `lang/` bawaan Laravel belum dipakai |
-
-## Kredit
-
-- Tampilan, copywriting, dan skema produk: [wang-vault/anubis](https://github.com/wang-vault/anubis) —
-  dipakai sebagai acuan desain & skema. Repo itu **tidak menyertakan berkas LICENSE** dan pemiliknya sama
-  (`wang-vault`), jadi port ini diterbitkan di bawah MIT
-- Bentuk proyek Laravel: [qwerti1945/dasar_laravel](https://github.com/qwerti1945/dasar_laravel) — acuan struktur (juga tanpa LICENSE)
-- Skeleton: [laravel/laravel](https://github.com/laravel/laravel) cabang `12.x` (MIT)
+Lisensi proyek ini: **MIT** (lihat file `LICENSE`).
